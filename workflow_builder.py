@@ -427,7 +427,7 @@ def create_interactive_editor(workflow: Dict[str, Any]) -> str:
             text.setAttribute('text-anchor', 'middle');
             text.setAttribute('font-size', '14');
             text.setAttribute('font-weight', 'bold');
-            text.textContent = nodeConfigs[node.type].icon + ' ' + node.name;
+            text.textContent = (nodeConfigs[node.type] ? nodeConfigs[node.type].icon : '📦') + ' ' + node.name;
             
             // 节点描述
             const desc = document.createElementNS(svgNS, 'text');
@@ -530,7 +530,13 @@ def create_workflow_visualization(workflow: Dict[str, Any]) -> graphviz.Digraph:
     
     # 添加节点
     for node in workflow['nodes']:
-        node_config = NODE_CONFIGS.get(NodeType(node['type']), {})
+        try:
+            node_type_enum = NodeType(node['type'])
+            node_config = NODE_CONFIGS.get(node_type_enum, {})
+        except ValueError:
+            # 如果节点类型不在枚举中，使用默认配置
+            node_config = {'icon': '📦', 'color': '#f0f0f0'}
+        
         label = f"{node_config.get('icon', '')} {node['name']}\\n{node['type']}"
         
         dot.node(
@@ -695,7 +701,15 @@ if st.session_state.current_workflow:
     cols = st.columns(2)
     for i, node in enumerate(workflow['nodes']):
         with cols[i % 2]:
-            with st.expander(f"{NODE_CONFIGS[NodeType(node['type'])]['icon']} {node['name']}"):
+            # 安全获取节点配置
+            try:
+                node_type_enum = NodeType(node['type'])
+                node_config = NODE_CONFIGS.get(node_type_enum, {})
+                icon = node_config.get('icon', '📦')
+            except ValueError:
+                icon = '📦'
+                
+            with st.expander(f"{icon} {node['name']}"):
                 st.write(f"**类型：** {node['type']}")
                 st.write(f"**描述：** {node['description']}")
                 
@@ -797,7 +811,14 @@ with tab3:
             
             with col2:
                 # 根据节点类型显示相应的配置字段
-                node_config = NODE_CONFIGS.get(NodeType(node['type']), {})
+                try:
+                    node_type_enum = NodeType(node['type'])
+                    node_config = NODE_CONFIGS.get(node_type_enum, {})
+                except ValueError:
+                    # 如果节点类型不在枚举中，使用默认配置
+                    st.warning(f"未知的节点类型: {node['type']}")
+                    node_config = {}
+                
                 if 'config_fields' in node_config:
                     st.write("**节点配置**")
                     for field_name, field_config in node_config['config_fields'].items():
@@ -848,17 +869,24 @@ with tab3:
             new_node_type = st.selectbox(
                 "节点类型",
                 options=[node_type.value for node_type in NodeType],
-                format_func=lambda x: NODE_CONFIGS[NodeType(x)]['name']
+                format_func=lambda x: NODE_CONFIGS.get(NodeType(x), {'name': x})['name']
             )
         with col2:
             new_node_name = st.text_input("节点名称", value="新节点")
         with col3:
             if st.button("➕ 添加节点"):
+                try:
+                    node_type_enum = NodeType(new_node_type)
+                    node_config = NODE_CONFIGS.get(node_type_enum, {})
+                    description = node_config.get('description', '新节点')
+                except ValueError:
+                    description = '新节点'
+                    
                 new_node = {
                     "id": str(uuid.uuid4())[:8],
                     "type": new_node_type,
                     "name": new_node_name,
-                    "description": NODE_CONFIGS[NodeType(new_node_type)]['description'],
+                    "description": description,
                     "position": {"x": 100, "y": len(workflow['nodes']) * 100},
                     "config": {},
                     "connections": []
@@ -912,7 +940,7 @@ with tab4:
             
             # 示例用法
             st.markdown("**示例用法：**")
-            if node_type == NodeType.LLM:
+            if node_type.value == "llm":
                 st.code("""
                 # LLM节点配置示例
                 {
@@ -922,7 +950,7 @@ with tab4:
                     "max_tokens": 1000
                 }
                 """, language="json")
-            elif node_type == NodeType.HTTP_REQUEST:
+            elif node_type.value == "http_request":
                 st.code("""
                 # HTTP请求节点配置示例
                 {
@@ -935,7 +963,7 @@ with tab4:
                     "timeout": 30
                 }
                 """, language="json")
-            elif node_type == NodeType.CODE:
+            elif node_type.value == "code":
                 st.code("""
                 # 代码执行节点示例
                 def process_data(input_data):
