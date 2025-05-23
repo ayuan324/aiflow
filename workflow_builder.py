@@ -137,24 +137,34 @@ NODE_CONFIGS = {
         "inputs": ["query"],
         "outputs": ["results", "urls"],
         "config_fields": {
-            "search_engine": {
+            "search_depth": {
                 "type": "select",
-                "label": "搜索引擎",
-                "options": ["google", "bing", "duckduckgo"],
-                "default": "google"
+                "label": "搜索深度",
+                "options": ["basic", "advanced"],
+                "default": "basic",
+                "help": "basic: 快速搜索, advanced: 深度搜索"
             },
             "num_results": {
                 "type": "number",
                 "label": "结果数量",
                 "default": 5,
                 "min": 1,
-                "max": 20
+                "max": 10
             },
             "search_type": {
                 "type": "select",
                 "label": "搜索类型",
-                "options": ["general", "news", "scholar"],
-                "default": "general"
+                "options": ["general", "news", "academic"],
+                "default": "general",
+                "help": "general: 通用搜索, news: 新闻搜索, academic: 学术搜索"
+            },
+            "days": {
+                "type": "number",
+                "label": "时间范围（天）",
+                "default": 30,
+                "min": 1,
+                "max": 365,
+                "help": "搜索最近N天内的内容"
             }
         }
     },
@@ -372,6 +382,11 @@ if 'api_key' not in st.session_state:
         st.session_state.api_key = st.secrets["OPENROUTER_API_KEY"]
     except:
         st.session_state.api_key = ""
+if 'tavily_api_key' not in st.session_state:
+    try:
+        st.session_state.tavily_api_key = st.secrets["TAVILY_API_KEY"]
+    except:
+        st.session_state.tavily_api_key = ""
 if 'selected_node' not in st.session_state:
     st.session_state.selected_node = None
 if 'execution_state' not in st.session_state:
@@ -490,71 +505,88 @@ class WorkflowExecutor:
         config = node.get('config', {})
         query = inputs.get('query', '')
         
-        # 模拟搜索结果（实际应用中应调用真实的搜索API）
         num_results = config.get('num_results', 5)
         search_type = config.get('search_type', 'general')
         
         self.log(f"搜索查询: {query}")
         self.log(f"搜索类型: {search_type}, 结果数: {num_results}")
         
-        # 使用DuckDuckGo API进行实际搜索（免费且无需API密钥）
+        # 使用TAVILY API进行搜索
         try:
-            search_url = f"https://api.duckduckgo.com/?q={query}&format=json&no_html=1&skip_disambig=1"
-            response = requests.get(search_url, timeout=10)
+            # 检查TAVILY API密钥
+            tavily_key = st.session_state.get('tavily_api_key', '')
+            if not tavily_key:
+                raise Exception("未配置TAVILY API密钥，请在侧边栏配置")
+            
+            headers = {
+                "Content-Type": "application/json"
+            }
+            
+            data = {
+                "api_key": tavily_key,
+                "query": query,
+                "max_results": num_results,
+                "search_depth": config.get('search_depth', 'basic'),
+                "include_answer": True,
+                "include_raw_content": False,
+                "include_images": False
+            }
+            
+            # 根据搜索类型添加额外参数
+            if search_type == "news":
+                data["topic"] = "news"
+                data["days"] = config.get('days', 7)
+            elif search_type == "academic":
+                data["include_domains"] = ["arxiv.org", "scholar.google.com", "pubmed.ncbi.nlm.nih.gov", "ieee.org"]
+            
+            # 添加时间范围
+            if config.get('days'):
+                data["days"] = config.get('days', 30)
+            
+            response = requests.post(
+                "https://api.tavily.com/search",
+                headers=headers,
+                json=data,
+                timeout=30
+            )
             
             if response.status_code == 200:
-                data = response.json()
+                result_data = response.json()
+                
+                # 处理TAVILY返回的结果
                 results = []
                 urls = []
                 
-                # 处理即时回答
-                if data.get('Abstract'):
+                # 如果有答案，添加到结果中
+                if result_data.get('answer'):
                     results.append({
-                        'title': 'Summary',
-                        'snippet': data['Abstract'],
-                        'url': data.get('AbstractURL', '')
+                        'title': 'AI Generated Answer',
+                        'snippet': result_data['answer'],
+                        'url': ''
                     })
-                    urls.append(data.get('AbstractURL', ''))
                 
-                # 处理相关主题
-                for topic in data.get('RelatedTopics', [])[:num_results]:
-                    if isinstance(topic, dict) and 'Text' in topic:
-                        results.append({
-                            'title': topic.get('Text', '').split(' - ')[0][:50],
-                            'snippet': topic.get('Text', ''),
-                            'url': topic.get('FirstURL', '')
-                        })
-                        urls.append(topic.get('FirstURL', ''))
-                
-                # 如果没有结果，创建模拟数据
-                if not results:
-                    results = [
-                        {
-                            'title': f'Search result {i+1} for "{query}"',
-                            'snippet': f'This is a simulated search result for the query "{query}". In production, this would contain real search results.',
-                            'url': f'https://example.com/result{i+1}'
-                        }
-                        for i in range(min(3, num_results))
-                    ]
-                    urls = [r['url'] for r in results]
+                # 处理搜索结果
+                for item in result_data.get('results', [])[:num_results]:
+                    results.append({
+                        'title': item.get('title', ''),
+                        'snippet': item.get('content', ''),
+                        'url': item.get('url', ''),
+                        'score': item.get('score', 0)
+                    })
+                    urls.append(item.get('url', ''))
                 
                 self.log(f"搜索完成，找到 {len(results)} 个结果")
                 return {"results": results, "urls": urls}
             else:
-                raise Exception(f"搜索API调用失败: {response.status_code}")
+                error_msg = f"TAVILY API调用失败: {response.status_code}"
+                if response.text:
+                    error_msg += f" - {response.text}"
+                raise Exception(error_msg)
                 
         except Exception as e:
-            self.log(f"搜索失败，返回模拟结果: {str(e)}", "WARNING")
-            # 返回模拟结果
-            results = [
-                {
-                    'title': f'Search result {i+1} for "{query}"',
-                    'snippet': f'This is a simulated search result. Error: {str(e)}',
-                    'url': f'https://example.com/result{i+1}'
-                }
-                for i in range(min(3, num_results))
-            ]
-            return {"results": results, "urls": [r['url'] for r in results]}
+            self.log(f"搜索失败: {str(e)}", "ERROR")
+            # 返回错误信息而不是模拟结果
+            raise e
     
     async def execute_http_request_node(self, node: Dict[str, Any], inputs: Dict[str, Any]) -> Dict[str, Any]:
         self.log(f"HTTP请求节点 '{node['name']}' 开始执行")
@@ -1417,13 +1449,33 @@ st.markdown("### 构建可执行的AI工作流，自动化您的任务")
 # 侧边栏
 with st.sidebar:
     st.header("⚙️ 配置")
-    api_key = st.text_input("OpenRouter API Key", 
-                           value=st.session_state.api_key, 
-                           type="password",
-                           help="请输入您的OpenRouter API密钥")
-    if api_key:
-        st.session_state.api_key = api_key
-        st.success("API密钥已配置")
+    
+    # API密钥配置
+    with st.expander("API密钥设置", expanded=True):
+        api_key = st.text_input("OpenRouter API Key", 
+                               value=st.session_state.api_key, 
+                               type="password",
+                               help="用于LLM节点")
+        if api_key:
+            st.session_state.api_key = api_key
+            
+        tavily_key = st.text_input("TAVILY API Key", 
+                                   value=st.session_state.tavily_api_key, 
+                                   type="password",
+                                   help="用于网络搜索节点")
+        if tavily_key:
+            st.session_state.tavily_api_key = tavily_key
+            
+        if api_key and tavily_key:
+            st.success("API密钥已配置")
+        else:
+            missing = []
+            if not api_key:
+                missing.append("OpenRouter")
+            if not tavily_key:
+                missing.append("TAVILY")
+            if missing:
+                st.warning(f"缺少 {', '.join(missing)} API密钥")
     
     st.divider()
     
@@ -1508,25 +1560,92 @@ with tab2:
         st.subheader(f"📋 {st.session_state.current_workflow['name']}")
         st.caption(st.session_state.current_workflow['description'])
         
-        # 工作流编辑器
-        editor_html = create_workflow_editor_html(st.session_state.current_workflow)
+        # 创建列布局
+        col1, col2 = st.columns([3, 1])
         
-        # 使用组件显示编辑器
-        components.html(editor_html, height=750, scrolling=False)
+        with col1:
+            # 工作流编辑器
+            editor_html = create_workflow_editor_html(st.session_state.current_workflow)
+            
+            # 使用iframe显示编辑器，避免WebSocket问题
+            components.html(editor_html, height=750, scrolling=False)
         
-        # JavaScript与Python通信
-        workflow_update = components.html("""
-        <script>
-        window.addEventListener('workflowUpdate', (e) => {
-            window.parent.postMessage({
-                type: 'streamlit:setComponentValue',
-                value: e.detail
-            }, '*');
-        });
-        </script>
-        """, height=0)
+        with col2:
+            # 简化的节点编辑面板
+            st.subheader("节点编辑")
+            
+            if st.session_state.current_workflow['nodes']:
+                node_names = [f"{node['name']} ({node['id']})" for node in st.session_state.current_workflow['nodes']]
+                selected_idx = st.selectbox("选择节点", range(len(node_names)), format_func=lambda x: node_names[x])
+                
+                if selected_idx is not None:
+                    node = st.session_state.current_workflow['nodes'][selected_idx]
+                    
+                    # 编辑节点名称
+                    new_name = st.text_input("节点名称", value=node['name'])
+                    if new_name != node['name']:
+                        node['name'] = new_name
+                    
+                    # 编辑节点配置
+                    node_type = NodeType(node['type'])
+                    node_config_def = NODE_CONFIGS.get(node_type, {})
+                    
+                    if 'config_fields' in node_config_def:
+                        st.markdown("**配置参数**")
+                        
+                        if 'config' not in node:
+                            node['config'] = {}
+                            
+                        for field_name, field_def in node_config_def['config_fields'].items():
+                            current_value = node['config'].get(field_name, field_def.get('default', ''))
+                            
+                            if field_def['type'] == 'text':
+                                new_value = st.text_input(
+                                    field_def['label'],
+                                    value=current_value,
+                                    help=field_def.get('help')
+                                )
+                            elif field_def['type'] == 'textarea':
+                                new_value = st.text_area(
+                                    field_def['label'],
+                                    value=current_value,
+                                    help=field_def.get('help')
+                                )
+                            elif field_def['type'] == 'select':
+                                new_value = st.selectbox(
+                                    field_def['label'],
+                                    options=field_def['options'],
+                                    index=field_def['options'].index(current_value) if current_value in field_def['options'] else 0
+                                )
+                            elif field_def['type'] == 'number':
+                                new_value = st.number_input(
+                                    field_def['label'],
+                                    value=current_value,
+                                    min_value=field_def.get('min', 0),
+                                    max_value=field_def.get('max', 9999)
+                                )
+                            elif field_def['type'] == 'slider':
+                                new_value = st.slider(
+                                    field_def['label'],
+                                    min_value=field_def['min'],
+                                    max_value=field_def['max'],
+                                    value=float(current_value),
+                                    step=field_def.get('step', 0.1)
+                                )
+                            elif field_def['type'] == 'code':
+                                new_value = st.text_area(
+                                    field_def['label'],
+                                    value=current_value,
+                                    height=150,
+                                    help=field_def.get('help')
+                                )
+                            else:
+                                new_value = current_value
+                            
+                            node['config'][field_name] = new_value
         
-        # 保存按钮
+        # 保存和导出按钮
+        st.divider()
         col1, col2, col3 = st.columns([1, 1, 1])
         with col1:
             if st.button("💾 保存工作流", type="primary"):
